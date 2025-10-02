@@ -4,18 +4,19 @@ import { doc, setDoc, updateDoc, onSnapshot, getDoc } from "firebase/firestore";
 
 export default function App() {
   const [playerName, setPlayerName] = useState("");
+  const [roomId, setRoomId] = useState("");
   const [playerId] = useState(() => Math.random().toString(36).substring(7));
+  const [roomRef, setRoomRef] = useState(null);
+
   const [gameStarted, setGameStarted] = useState(false);
   const [choice, setChoice] = useState(null);
   const [otherChoice, setOtherChoice] = useState(null);
   const [match, setMatch] = useState(false);
   const [round, setRound] = useState(0);
-  const [score, setScore] = useState(0);
+  const [teamScore, setTeamScore] = useState(0);
   const [gameOver, setGameOver] = useState(false);
   const [gameWon, setGameWon] = useState(false);
   const [waiting, setWaiting] = useState(false);
-
-  const roomRef = doc(db, "games", "room1");
 
   const allOptions = [
     ["Apollo bagels", "Leon's bagels"],
@@ -36,7 +37,7 @@ export default function App() {
 
   // Listen to Firebase updates
   useEffect(() => {
-    if (!gameStarted) return;
+    if (!roomRef) return;
 
     const unsub = onSnapshot(roomRef, (docSnap) => {
       if (!docSnap.exists()) return;
@@ -51,11 +52,21 @@ export default function App() {
         ([id]) => id !== playerId
       );
       const opponentChoice = opponentEntry?.[1]?.choice || null;
-      const myScore = players[playerId]?.score || 0;
 
       setChoice(myChoice);
       setOtherChoice(opponentChoice);
-      setScore(myScore);
+
+      // ✅ calculate team score (sum of all players' scores)
+      const teamScoreTotal = Object.values(players).reduce(
+        (sum, p) => sum + (p.score || 0),
+        0
+      );
+      setTeamScore(teamScoreTotal);
+
+      // Start game only if 2 players joined
+      if (Object.keys(players).length >= 2) {
+        setGameStarted(true);
+      }
 
       if (myChoice && opponentChoice) {
         if (myChoice === opponentChoice) {
@@ -73,27 +84,29 @@ export default function App() {
     });
 
     return () => unsub();
-  }, [playerId, gameStarted]);
+  }, [playerId, roomRef]);
 
-  const startGame = async () => {
-    const docSnap = await getDoc(roomRef);
+  const createOrJoinRoom = async () => {
+    if (!roomId || !playerName) return;
+    const ref = doc(db, "games", roomId);
+    setRoomRef(ref);
+
+    const docSnap = await getDoc(ref);
     if (!docSnap.exists()) {
-      await setDoc(roomRef, {
+      await setDoc(ref, {
         round: 0,
         gameOver: false,
         gameWon: false,
         players: {},
       });
     }
-    await updateDoc(roomRef, {
+    await updateDoc(ref, {
       [`players.${playerId}`]: { name: playerName, choice: null, score: 0 },
     });
-    setScore(0);
-    setGameStarted(true);
   };
 
   const handleChoice = async (option) => {
-    if (gameOver || gameWon) return;
+    if (gameOver || gameWon || !roomRef) return;
 
     const docSnap = await getDoc(roomRef);
     const players = docSnap.exists() ? docSnap.data().players || {} : {};
@@ -114,8 +127,6 @@ export default function App() {
       setMatch(false);
     }
 
-    setScore(newScore);
-
     await updateDoc(roomRef, {
       [`players.${playerId}`]: {
         name: playerName,
@@ -126,6 +137,7 @@ export default function App() {
   };
 
   const nextRound = async () => {
+    if (!roomRef) return;
     const docSnap = await getDoc(roomRef);
     if (!docSnap.exists()) return;
     const data = docSnap.data();
@@ -137,7 +149,7 @@ export default function App() {
       return;
     }
 
-    // Only reset choices, keep scores
+    // Reset choices, keep scores
     const resetPlayers = {};
     Object.entries(players).forEach(([id, p]) => {
       resetPlayers[id] = { ...p, choice: null };
@@ -145,8 +157,11 @@ export default function App() {
 
     if (round + 1 >= allOptions.length) {
       // Game end
-      const myFinalScore = players[playerId]?.score || 0;
-      if (myFinalScore >= 5)
+      const totalScore = Object.values(players).reduce(
+        (sum, p) => sum + (p.score || 0),
+        0
+      );
+      if (totalScore >= 5)
         await updateDoc(roomRef, { gameWon: true, players: resetPlayers });
       else await updateDoc(roomRef, { gameOver: true, players: resetPlayers });
       return;
@@ -160,6 +175,7 @@ export default function App() {
   };
 
   const playAgain = async () => {
+    if (!roomRef) return;
     await setDoc(roomRef, {
       round: 0,
       gameOver: false,
@@ -167,7 +183,7 @@ export default function App() {
       players: {},
     });
     setRound(0);
-    setScore(0);
+    setTeamScore(0);
     setChoice(null);
     setOtherChoice(null);
     setMatch(false);
@@ -178,7 +194,7 @@ export default function App() {
   };
 
   // --- Screens ---
-  if (!gameStarted)
+  if (!roomRef || !gameStarted)
     return (
       <div
         style={{
@@ -206,6 +222,19 @@ export default function App() {
           value={playerName}
           onChange={(e) => setPlayerName(e.target.value)}
         />
+        <input
+          style={{
+            padding: "1rem",
+            borderRadius: "1rem",
+            marginBottom: "1rem",
+            textAlign: "center",
+            fontSize: "1rem",
+            width: "16rem",
+          }}
+          placeholder="Enter room ID"
+          value={roomId}
+          onChange={(e) => setRoomId(e.target.value)}
+        />
         <button
           style={{
             padding: "1rem 2rem",
@@ -216,11 +245,17 @@ export default function App() {
             fontSize: "1rem",
             cursor: "pointer",
           }}
-          disabled={!playerName}
-          onClick={startGame}
+          disabled={!playerName || !roomId}
+          onClick={createOrJoinRoom}
         >
-          Start Game
+          Create / Join Room
         </button>
+
+        {roomId && playerName && (
+          <p style={{ fontSize: "1.2rem", marginTop: "1rem", color: "#ccc" }}>
+            Waiting for another player to join room <strong>{roomId}</strong>...
+          </p>
+        )}
       </div>
     );
 
@@ -238,7 +273,7 @@ export default function App() {
       >
         <h1 style={{ fontSize: "3rem", marginBottom: "1rem" }}>Game Over!</h1>
         <p style={{ fontSize: "1.5rem", marginBottom: "1rem" }}>
-          Final Score: <strong>{score}</strong>
+          Final Team Score: <strong>{teamScore}</strong>
         </p>
         <button
           style={{
@@ -273,7 +308,7 @@ export default function App() {
           It's a Match! ❤️
         </h1>
         <p style={{ fontSize: "1.5rem", marginBottom: "1rem" }}>
-          Final Score: <strong>{score}</strong>
+          Final Team Score: <strong>{teamScore}</strong>
         </p>
         <button
           style={{
@@ -313,7 +348,7 @@ export default function App() {
           Player: <strong>{playerName}</strong>
         </p>
         <p style={{ fontSize: "1.5rem", marginBottom: "2rem" }}>
-          Score: <strong>{score}</strong>
+          Team Score: <strong>{teamScore}</strong>
         </p>
 
         <div
